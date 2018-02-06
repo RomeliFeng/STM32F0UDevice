@@ -19,7 +19,8 @@ UUSART::UUSART(uint16_t rxBufSize, uint16_t txBufSize, USART_TypeDef* USARTx,
 	_DMA_IT_TC_TX = 0;
 	_DMAy_Channelx_Rx = 0;
 	_DMAy_Channelx_Tx = 0;
-
+	
+	_EPool = nullptr;
 	ReceiveEvent = nullptr;
 	_mode = Mode_Interrupt;
 }
@@ -38,6 +39,9 @@ UUSART::UUSART(uint16_t rxBufSize, uint16_t txBufSize, USART_TypeDef* USARTx,
 	_ITDMAx = itDMAx;
 
 	CalcDMATC();
+
+	_EPool = nullptr;
+	ReceiveEvent = nullptr;
 
 	_DMARxBuf.data = 0;
 	_DMARxBuf.end = 0;
@@ -136,6 +140,18 @@ bool UUSART::CheckFrame() {
 
 /*
  * author Romeli
+ * explain 设置事件触发时自动加入事件池
+ * param1 rcvEvent ReceiveEvent的回调函数
+ * param2 pool 触发时会加入的的事件池
+ * return void
+ */
+void UUSART::SetEventPool(voidFun rcvEvent, UEventPool& pool) {
+	ReceiveEvent = rcvEvent;
+	_EPool = &pool;
+}
+
+/*
+ * author Romeli
  * explain 串口接收中断
  * return Status_Typedef
  */
@@ -168,7 +184,11 @@ Status_Typedef UUSART::IRQUSART() {
 		USART_ClearITPendingBit(_USARTx, USART_IT_IDLE);
 		//串口帧接收事件
 		if (ReceiveEvent != nullptr) {
-			ReceiveEvent();
+			if (_EPool != nullptr) {
+				_EPool->Insert(ReceiveEvent);
+			} else {
+				ReceiveEvent();
+			}
 		}
 	}
 #ifndef USE_DMA

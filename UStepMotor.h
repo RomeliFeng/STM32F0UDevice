@@ -78,7 +78,7 @@ public:
 		SetEnPin(DISABLE);
 	}
 	//保护检测
-	void SafetyProtect(uint8_t limit);
+	void SafetyProtect(uint32_t limit);
 
 	void IRQ();
 protected:
