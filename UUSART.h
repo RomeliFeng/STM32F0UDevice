@@ -10,9 +10,8 @@
 
 #include <cmsis_device.h>
 #include <Communication/UStream.h>
-#include <Tool/UEventPool.h>
-#include <UDebug.h>
-#include <UMisc.h>
+#include <Event/UEventPool.h>
+#include <Misc/UMisc.h>
 
 class UUSART: public UStream {
 public:
@@ -22,7 +21,7 @@ public:
 	};
 
 	enum RS485Status_Typedef {
-		RS485Status_Enable, RS485Status_Disable
+		RS485Status_Disable, RS485Status_Enable
 	};
 
 	enum RS485Dir_Typedef {
@@ -47,6 +46,8 @@ public:
 	bool CheckFrame();
 
 	void SetEventPool(voidFun rcvEvent, UEventPool &pool);
+
+	virtual bool IsBusy();
 
 	Status_Typedef IRQUSART();
 	Status_Typedef IRQDMATx();
@@ -74,7 +75,7 @@ private:
 	UIT_Typedef _ITUSARTx;
 	UIT_Typedef _ITDMAx;
 
-	Mode_Typedef _mode;
+	Mode_Typedef _Mode;
 
 	void CalcDMATC();
 

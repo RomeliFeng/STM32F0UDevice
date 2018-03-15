@@ -7,6 +7,7 @@
 
 #include <UStepMotor.h>
 #include <UStepMotorAccDecUnit.h>
+#include <Misc/UDebug.h>
 
 UStepMotor* UStepMotor::_Pool[4];
 uint8_t UStepMotor::_PoolSp = 0;
@@ -45,19 +46,20 @@ UStepMotor::UStepMotor(TIM_TypeDef* TIMx, uint8_t TIMx_CCR_Ch,
 	_CurStep = 0;	//当前已移动步数
 	_TgtStep = 0;	//目标步数
 	_DecelStartStep = 0;	//减速开始步数
+	_StepEncoder = 0;
 
 	_Accel = 20000;	//加速度
 	_Decel = 20000;	//减速度
 	_MaxSpeed = 10000;	//最大速度
 
-	_CWLimit = 0; //正转保护限位
-	_CCWLimit = 0; //反转保护限位
+	_Limit_CW = 0; //正转保护限位
+	_Limit_CCW = 0; //反转保护限位
 
 	_RelativeDir = Dir_CW; //实际方向对应
 	_CurDir = Dir_CW; //当前方向
 
 	_Flow = Flow_Stop;
-	_StepLimit = true;
+	_StepLimitAction = true;
 	_Busy = false;	//当前电机繁忙?
 }
 
@@ -74,6 +76,7 @@ void UStepMotor::Init() {
 	TIMInit();
 	ITInit();
 	_TIMy_FRQ = SystemCoreClock / (_TIMx->PSC + 1);
+	Lock();
 }
 
 /*
@@ -141,16 +144,73 @@ void UStepMotor::SetRelativeDir(Dir_Typedef dir) {
 
 /*
  * author Romeli
- * explain 移动步进电机
- * param1 step 欲移动的步数（为0时不会主动停止）
- * param2 dir 运动方向
+ * explain 设置步进电机保护限位（正转）
+ * param cwLimit
  * return void
  */
-Status_Typedef UStepMotor::Move(uint32_t step, Dir_Typedef dir) {
+void UStepMotor::SetLimit_CW(uint8_t limit_CW) {
+	_Limit_CW = limit_CW;
+}
+
+/*
+ * author Romeli
+ * explain 设置步进电机保护限位（反转）
+ * param cwLimit
+ * return void
+ */
+void UStepMotor::SetLimit_CCW(uint8_t limit_CCW) {
+	_Limit_CCW = limit_CCW;
+}
+
+/*
+ * author Romeli
+ * explain 设置步进电机保护限位
+ * param cwLimit 正转限位
+ * param ccwLimit 反转限位
+ * return void
+ */
+void UStepMotor::SetLimit(uint8_t limit_CW, uint8_t limit_CCW) {
+	SetLimit_CW(limit_CW);
+	SetLimit_CCW(limit_CCW);
+}
+
+/*
+ * author Romeli
+ * explain 设置步进电机保护限位
+ * param dir 方向
+ * param limit 限位
+ * return void
+ */
+void UStepMotor::SetLimit(Dir_Typedef dir, uint8_t limit) {
+	if (dir == Dir_CW) {
+		_Limit_CW = limit;
+	} else {
+		_Limit_CCW = limit;
+	}
+}
+
+/*
+ * author Romeli
+ * explain 移动步进电机
+ * param step 欲运动的步数（为0时不会主动停止）
+ * param dir 运动方向
+ * param sync 是否等待运动结束
+ * return void
+ */
+Status_Typedef UStepMotor::Move(uint32_t step, Dir_Typedef dir, bool sync) {
 	//停止如果有的运动
 	Stop();
+	//设置方向
+	SetDir(dir);
+	//检测保护限位
+	if (SafetyProtect()) {
+		//限位保护触发
+		return Status_Error;
+	}
 	//锁定当前运动
 	_Busy = true;
+	//使能电机
+	Lock();
 	//获取可用的速度计算单元
 	_AccDecUnit = UStepMotorAccDecUnit::GetFreeUnit(this);
 	if (_AccDecUnit == 0) {
@@ -163,10 +223,10 @@ Status_Typedef UStepMotor::Move(uint32_t step, Dir_Typedef dir) {
 	_CurStep = 0;
 	if (step != 0) {
 		//基于步数运动
-		_StepLimit = true;
+		_StepLimitAction = true;
 		_TgtStep = step;
 
-		if (_Decel != 0) {
+		if ((_Decel != 0) && (_TgtStep >= 1)) {
 			//当减速存在并且处于步数控制的运动流程中
 			//从最高速减速
 			uint32_t tmpStep = GetDecelStep(_MaxSpeed);
@@ -176,18 +236,15 @@ Status_Typedef UStepMotor::Move(uint32_t step, Dir_Typedef dir) {
 			_DecelStartStep = (
 					tmpStep >= tmpStep2 ? tmpStep2 : _TgtStep - tmpStep) - 1;
 		} else {
-			//减速度为0
+			//减速度为0 或者目标步数为1
 			_DecelStartStep = 0;
 		}
 	} else {
 		//持续运动，
-		_StepLimit = false;
+		_StepLimitAction = false;
 		_TgtStep = 0;
 		_DecelStartStep = 0;
 	}
-
-	//设置方向
-	SetDir(dir);
 
 	//切换步进电机状态为加速
 	_Flow = Flow_Accel;
@@ -207,7 +264,39 @@ Status_Typedef UStepMotor::Move(uint32_t step, Dir_Typedef dir) {
 	TIM_Clear_Update_Flag(_TIMx);
 	TIM_Enable_IT_Update(_TIMx);
 	TIM_Enable(_TIMx);
+
+	if (sync) {
+		while (_Busy)
+			;
+	}
 	return Status_Ok;
+}
+
+/*
+ * author Romeli
+ * explain 运动步进电机
+ * param step 欲移动的步数(+为正传，-为反转，0不转)
+ * param sync 是否等待运动结束
+ * return void
+ */
+Status_Typedef UStepMotor::Move(int32_t step, bool sync) {
+	if (step > 0) {
+		return Move(step, Dir_CW, sync);
+	} else if (step < 0) {
+		return Move(-step, Dir_CCW, sync);
+	} else {
+		return Status_Ok;
+	}
+}
+
+/*
+ * author Romeli
+ * explain 持续运动步进电机
+ * param dir 电机转动方向
+ * return void
+ */
+Status_Typedef UStepMotor::Run(Dir_Typedef dir) {
+	return Move(0, dir);
 }
 
 /*
@@ -223,6 +312,17 @@ void UStepMotor::Stop() {
 	UStepMotorAccDecUnit::Free(this);
 	//清空忙标志
 	_Busy = false;
+	switch (_CurDir) {
+	case Dir_CW:
+		_StepEncoder += _CurStep;
+		break;
+	case Dir_CCW:
+		_StepEncoder -= _CurStep;
+		break;
+	default:
+		break;
+	}
+	_CurStep = 0;
 }
 
 /*
@@ -234,8 +334,26 @@ void UStepMotor::StopSlow() {
 	//根据当前步数和从当前速度减速所需步数计算目标步数
 	_TgtStep = GetDecelStep(_MaxSpeed) + _CurStep;
 	//变更模式为步数限制
-	_StepLimit = true;
+	_StepLimitAction = true;
 	StartDec();
+}
+
+/*
+ * author Romeli
+ * explain 锁定步进电机（使能）
+ * return void
+ */
+void UStepMotor::Lock() {
+	SetEnPin(ENABLE);
+}
+
+/*
+ * author Romeli
+ * explain 解锁步进电机（禁用）
+ * return void
+ */
+void UStepMotor::Unlock() {
+	SetEnPin(DISABLE);
 }
 
 /*
@@ -243,21 +361,25 @@ void UStepMotor::StopSlow() {
  * explain	检测是否可以安全移动（需要在派生类中重写）
  * return bool 是否安全可移动
  */
-void UStepMotor::SafetyProtect(uint32_t limit) {
+bool UStepMotor::SafetyProtect() {
+	bool status = false;
 	switch (_CurDir) {
 	case Dir_CW:
-		if ((limit & _CWLimit) != 0) {
+		if (GetLimit_CW()) {
+			status = true;
 			Stop();
 		}
 		break;
 	case Dir_CCW:
-		if ((limit & _CCWLimit) != 0) {
+		if (GetLimit_CCW()) {
+			status = true;
 			Stop();
 		}
 		break;
 	default:
 		break;
 	}
+	return status;
 }
 
 /*
@@ -267,22 +389,22 @@ void UStepMotor::SafetyProtect(uint32_t limit) {
  */
 void UStepMotor::IRQ() {
 	_CurStep++;
+
 	//处于步数限制运动中 并且 到达指定步数，停止运动
+	if (_StepLimitAction && (_CurStep == _TgtStep)) {
+		//当处于步数运动并且到达指定步数时，停止
+		_Flow = Flow_Stop;
+	}
 
 	switch (_Flow) {
 	case Flow_Accel:
-		//_DecelStartStep = 0 时为持续运动模式
-		if (_DecelStartStep != 0) {
-			//当减速流程存在
+		if (_StepLimitAction) {
+			//步数限制运动模式
 			if (_CurStep >= _DecelStartStep) {
 				//到达减速步数，进入减速流程
 				StartDec();
 				_Flow = Flow_Decel;
 			}
-		} else if (_StepLimit && (_CurStep == _TgtStep)) {
-			//当减速流程不存在时，有可能在加速中进入停止流程
-			_Flow = Flow_Stop;
-			Stop();
 		}
 		if (_AccDecUnit->IsDone()) {
 			//到达最高步数，开始匀速流程
@@ -291,23 +413,17 @@ void UStepMotor::IRQ() {
 		SetSpeed(_AccDecUnit->GetCurSpeed());
 		break;
 	case Flow_Run:
-		if (_StepLimit && (_CurStep >= _DecelStartStep)) {
+		if (_StepLimitAction && (_CurStep >= _DecelStartStep)) {
 			//到达减速步数，进入减速流程
 			StartDec();
 			_Flow = Flow_Decel;
-		} else if (_StepLimit && (_CurStep == _TgtStep)) {
-			//当减速流程不存在时，有可能在运行中中进入停止流程
-			_Flow = Flow_Stop;
-			Stop();
 		}
 		break;
 	case Flow_Decel:
 		SetSpeed(_AccDecUnit->GetCurSpeed());
-		if (_CurStep == _TgtStep) {
-			//当减速流程时，有可能进入停止流程
-			_Flow = Flow_Stop;
-			Stop();
-		}
+		break;
+	case Flow_Stop:
+		Stop();
 		break;
 	default:
 		//Error @Romeli 不可能到达位置（内存溢出）
@@ -366,6 +482,26 @@ void UStepMotor::SetEnPin(FunctionalState newState) {
 	} else {
 
 	}
+}
+
+/*
+ * author Romeli
+ * explain 获取正转限位传感器状态（建议在派生类中重写）
+ * return uint32_t
+ */
+bool UStepMotor::GetLimit_CW() {
+	//ToDo 不应该这么写，应删除限位传感器uint32_t 改为传感器位号？？？细化为检测正传传感器 和 反转传感器触发信号
+	return false;
+}
+
+/*
+ * author Romeli
+ * explain 获取反转限位传感器状态（建议在派生类中重写）
+ * return uint32_t
+ */
+bool UStepMotor::GetLimit_CCW() {
+	//ToDo 不应该这么写，应删除限位传感器uint32_t 改为传感器位号？？？细化为检测正传传感器 和 反转传感器触发信号
+	return false;
 }
 
 /*
